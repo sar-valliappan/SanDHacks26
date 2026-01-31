@@ -1,0 +1,31 @@
+# --- Environment & Sensitive Keys ---
+.env
+keys.json
+*.pem
+
+# --- Python & Dependencies ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# --- Local Data & Recordings ---
+# We ignore the contents of data/ but keep the directory structure
+data/questions.json
+
+# If you want to keep the folders but ignore files:
+!data/.gitkeep
+
+# --- IDE & OS Files ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Logs ---
+*.log
