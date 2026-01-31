@@ -1,5 +1,9 @@
 import os
 import re
+from dotenv import load_dotenv
+
+# Load environment variables explicitly
+load_dotenv()
 
 # Toggle between mock and groq without breaking teammates
 STT_PROVIDER = os.getenv("STT_PROVIDER", "mock")  # "mock" or "groq"
@@ -68,6 +72,7 @@ def transcribe_and_analyze(audio_bytes: bytes, duration_seconds: float = 30.0, f
     if STT_PROVIDER == "groq":
         transcript = groq_transcribe(audio_bytes, file_ext=file_ext)
     else:
+        print("[INFO] Using MOCK STT provider (set STT_PROVIDER='groq' to use real API)")
         # Mock transcript fallback (demo-safe)
         transcript = (
             "I led a project under pressure when our deadline changed. "
@@ -76,3 +81,62 @@ def transcribe_and_analyze(audio_bytes: bytes, duration_seconds: float = 30.0, f
 
     metrics = extract_metrics(transcript, duration_seconds=duration_seconds)
     return {"transcript": transcript, "metrics": metrics}
+
+def process_file(file_path: str) -> dict:
+    """
+    Reads an audio file and processes it using the transcription engine.
+    """
+    if not os.path.exists(file_path):
+        return {"error": f"File not found: {file_path}"}
+        
+    try:
+        with open(file_path, "rb") as f:
+            audio_bytes = f.read()
+            
+        # Determine file extension
+        _, ext = os.path.splitext(file_path)
+        
+        # Determine duration - for now, we'll estimate or use default since reading duration from bytes is complex without extra libs
+        # Ideally, we should use wave module or similar if we want exact duration, but for now 30.0 default is fine for metrics
+        # If the file is a wav file, we can try to get duration
+        duration = 30.0
+        if ext.lower() == ".wav":
+            import wave
+            try:
+                with wave.open(file_path, 'rb') as wf:
+                    frames = wf.getnframes()
+                    rate = wf.getframerate()
+                    duration = frames / float(rate)
+            except Exception:
+                pass # Fallback to default
+        
+        return transcribe_and_analyze(audio_bytes, duration_seconds=duration, file_ext=ext)
+    except Exception as e:
+        return {"error": str(e)}
+
+if __name__ == "__main__":
+    import sys
+    # Add parent directory to path to find config
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+    from config import Config
+    
+    # Check for command line argument, otherwise use default from get_recording.py
+    if len(sys.argv) > 1:
+        audio_file = sys.argv[1]
+    else:
+        # Default path where get_recording.py saves it
+        if "data" not in os.listdir("."):
+             # Try to find data dir relative to script if run from root
+             audio_file = os.path.join("data", "test_audio.wav")
+        else:
+             audio_file = "data/test_audio.wav"
+             
+        # Check absolute path fallback from config if imported
+        if not os.path.exists(audio_file):
+             # Try Config.DATA_DIR
+             audio_file = os.path.join(Config.DATA_DIR, "test_audio.wav")
+    
+    print(f"Processing audio file: {audio_file}")
+    result = process_file(audio_file)
+    print("Result:")
+    print(result)
