@@ -85,13 +85,9 @@ class InterviewRecorder:
             audio_cmd = f'start /min "" "{audio_path}"'
         else: # Mac/Linux
             audio_cmd = f"afplay {audio_path} &" if os.uname().sysname == 'Darwin' else f"aplay {audio_path} &"
-        print("got to here 0")
         os.system(audio_cmd)
-        print("got to here 1")
         cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
-        print("got to here 1.5")
         fps = cap.get(cv2.CAP_PROP_FPS) or 20
-        print("got to here 2")
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret: break
