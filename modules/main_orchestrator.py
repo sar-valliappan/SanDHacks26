@@ -2,6 +2,7 @@ import time
 import os
 import cv2
 import sys
+import json
 
 # Adds the parent directory to the system path so it can find config.py
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -10,6 +11,17 @@ from modules.gen_questions import QuestionGenerator
 from modules.text_to_speech import TextToSpeech
 from modules.get_recording import InterviewRecorder
 from config import Config
+
+def load_questions():
+    """Loads questions from the local JSON file."""
+    path = os.path.join(Config.DATA_DIR, "questions.json")
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+            return data.get("questions", [])
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"❌ Error loading questions.json: {e}")
+        return []
 
 def run_countdown(seconds):
     """Displays a simple terminal countdown for preparation."""
@@ -34,7 +46,7 @@ def start_interview():
     print("\n🧠 AI is analyzing your profile and the job role...")
     # Assume generate_questions returns a list of strings
     q_gen.generate_interview_questions(jd_text, resume_path)
-    questions = os.path.join(Config.DATA_DIR, "questions.json").get("questions")
+    questions = load_questions()
 
     if not questions:
         print("❌ Failed to generate questions. Check your API key or inputs.")
@@ -58,11 +70,11 @@ def start_interview():
         run_countdown(10)
         
         # D. Record Answer (Video + Audio)
-        video_output = os.path.join(Config.DATA_DIR, f"answer_video_{i}.mp4")
-        audio_output = os.path.join(Config.DATA_DIR, f"answer_audio_{i}.wav")
+        video_output = os.path.join(Config.ANSWER_VIDEOS_DIR, f"answer_video_{i}.mp4")
+        audio_output = os.path.join(Config.ANSWER_AUDIOS_DIR, f"answer_audio_{i}.wav")
         
         # record handles both streams via threading
-        recorder.record(video_output, audio_output, duration=5)
+        recorder.record_interview_part(video_output, audio_output, duration=5)
         
         print(f"✅ Answer {i+1} recorded and saved.\n")
         time.sleep(2) # Brief pause before the next question
