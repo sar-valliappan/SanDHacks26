@@ -1,0 +1,23 @@
+{
+    "resume_info": {
+        "name": "Candidate",
+        "skills": [
+            "Python",
+            "JavaScript",
+            "React"
+        ],
+        "experience_years": 2,
+        "keywords": [
+            "full-stack",
+            "web development",
+            "API"
+        ]
+    },
+    "questions": [
+        "Tell me about yourself and your background in software development.",
+        "Can you describe a challenging project you worked on and how you overcame obstacles?",
+        "How do you approach learning new technologies?",
+        "Describe your experience with version control and team collaboration.",
+        "Where do you see yourself in 5 years?"
+    ]
+}

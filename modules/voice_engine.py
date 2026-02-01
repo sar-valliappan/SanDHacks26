@@ -1,229 +1,254 @@
+
 import os
 import re
+import json
+import time
 from dotenv import load_dotenv
 
-# Load environment variables explicitly
 load_dotenv()
 
-# Toggle between mock and groq without breaking teammates
-STT_PROVIDER = os.getenv("STT_PROVIDER", "mock")  # "mock" or "groq"
-
 FILLER_PHRASES = [
-    "um", "uh", "like", "you know", "basically", "actually", "literally", "sort of", "kind of"
+    "um", "uh", "like", "you know", "basically", "actually", "literally", "sort of", "kind of", "i mean", "right"
 ]
 
-def extract_metrics(transcript: str, duration_seconds: float = 30.0) -> dict:
+def extract_metrics(transcript: str, segments: list = None, duration_seconds: float = 30.0) -> dict:
+    """Extract speech metrics from transcript."""
     clean = transcript.strip()
     words = re.findall(r"\b[\w']+\b", clean)
     word_count = len(words)
 
     lower = clean.lower()
     filler_counts = {}
+    total_fillers = 0
     for phrase in FILLER_PHRASES:
         pattern = rf"(?<!\w){re.escape(phrase)}(?!\w)"
-        filler_counts[phrase] = len(re.findall(pattern, lower))
+        count = len(re.findall(pattern, lower))
+        if count > 0:
+            filler_counts[phrase] = count
+            total_fillers += count
 
     duration_seconds = max(duration_seconds, 1.0)
-    pace_wpm = int(round(word_count / (duration_seconds / 60.0)))
-
-    # crude proxy until you have word timestamps
-    pause_count = filler_counts.get("um", 0) + filler_counts.get("uh", 0)
-
+    pace_wpm = int(round(word_count / (duration_seconds / 60.0))) if word_count > 0 else 0
+    
+    # Estimate pauses from segments
+    pause_count = 0
+    if segments and len(segments) > 1:
+        for i in range(1, len(segments)):
+            prev_end = segments[i-1].get('end', 0)
+            curr_start = segments[i].get('start', 0)
+            gap = curr_start - prev_end
+            if gap > 0.5:
+                pause_count += 1
+    
     sentence_count = len([s for s in re.split(r"[.!?]+", clean) if s.strip()])
 
     return {
         "word_count": word_count,
         "sentence_count": sentence_count,
         "pace_wpm": pace_wpm,
-        "filler_words": filler_counts,
+        "filler_words": filler_counts if filler_counts else {},
+        "total_fillers": total_fillers,
         "pause_count": pause_count,
-    }
-
-def groq_transcribe(audio_bytes: bytes, file_ext: str = ".wav") -> dict:
-    """
-    Groq Whisper STT.
-    Pass audio as (filename, bytes) so the SDK knows the format.
-    Returns: {"text": str, "segments": list}
-    """
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        raise RuntimeError("Missing GROQ_API_KEY in environment/.env")
-
-    from groq import Groq
-    client = Groq(api_key=api_key)
-
-    filename = f"audio{file_ext}"  # e.g. audio.m4a, audio.wav
-    
-    # Use verbose_json to get segments/timestamps
-    result = client.audio.transcriptions.create(
-        file=(filename, audio_bytes),
-        model="whisper-large-v3",
-        response_format="verbose_json"
-    )
-
-    # result is a dictionary-like object when using verbose_json in Groq/OpenAI client
-    # It has 'text' and 'segments'
-    return {
-        "text": result.text,
-        "segments": result.segments
+        "duration_seconds": round(duration_seconds, 1)
     }
 
 
-def transcribe_and_analyze(audio_bytes: bytes, duration_seconds: float = 30.0, file_ext: str = ".wav") -> dict:
-    """
-    Returns:
-      {
-        "transcript": str,
-        "segments": list, # New field with timestamps
-        "metrics": { pace_wpm, filler_words, pause_count, ... }
-      }
-    """
-
-    segments = []
+def wait_for_file_active(genai_file, timeout=60):
+    """Wait for uploaded file to become ACTIVE state."""
+    import google.generativeai as genai
     
-    if STT_PROVIDER == "groq":
-        result = groq_transcribe(audio_bytes, file_ext=file_ext)
-        transcript = result.get("text", "")
-        segments = result.get("segments", [])
-    else:
-        print("[INFO] Using MOCK STT provider (set STT_PROVIDER='groq' to use real API)")
-        # Mock transcript fallback (demo-safe)
-        transcript = (
-            "I led a project under pressure when our deadline changed. "
-            "Um, like, we had to reorganize fast."
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        file_status = genai.get_file(genai_file.name)
+        if file_status.state.name == "ACTIVE":
+            return True
+        elif file_status.state.name == "FAILED":
+            return False
+        print(f"[INFO] Waiting for file to be ready... ({file_status.state.name})")
+        time.sleep(2)
+    return False
+
+
+def get_video_duration(file_path: str) -> float:
+    """Get actual video duration using ffprobe or file size estimate."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['ffprobe', '-v', 'quiet', '-show_entries', 'format=duration', '-of', 'csv=p=0', file_path],
+            capture_output=True, text=True, timeout=10
         )
-        # Mock segments
-        segments = [
-            {"start": 0.0, "end": 2.5, "text": "I led a project under pressure when our deadline changed."},
-            {"start": 3.0, "end": 6.0, "text": "Um, like, we had to reorganize fast."}
-        ]
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except:
+        pass
+    
+    # Fallback: estimate from file size (~50KB per second for webm)
+    try:
+        size = os.path.getsize(file_path)
+        return max(5.0, size / 50000)
+    except:
+        return 30.0
 
-    metrics = extract_metrics(transcript, duration_seconds=duration_seconds)
-    return {"transcript": transcript, "segments": segments, "metrics": metrics}
 
-    metrics = extract_metrics(transcript, duration_seconds=duration_seconds)
-    return {"transcript": transcript, "segments": segments, "metrics": metrics}
-
-def analyze_tone(file_path: str, mime_type: str = "audio/wav") -> dict:
-    """
-    Uses Gemini to analyze the vocal tone and emotion of the audio.
-    """
+def transcribe_with_gemini(file_path: str) -> dict:
+    """Use Gemini to transcribe audio/video and detect pauses."""
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-         print("[INFO] Skipping tone analysis: GEMINI_API_KEY not found.")
-         return {"tone": "unknown", "emotion": "unknown", "intensity": "unknown"}
-
+        return {"text": "", "segments": [], "pause_count": 0, "error": "No API key"}
+    
     try:
         import google.generativeai as genai
         genai.configure(api_key=api_key)
         
-        # Upload the file to Gemini
-        # Note: For efficiency in production, consider inline data if file is small, 
-        # or File API if large. Here we use File API for simplicity.
-        audio_file = genai.upload_file(file_path, mime_type=mime_type)
+        print(f"[INFO] Uploading file for transcription: {file_path}")
+        uploaded_file = genai.upload_file(file_path)
         
+        # Wait for file to become active
+        if not wait_for_file_active(uploaded_file):
+            return {"text": "", "segments": [], "pause_count": 0, "error": "File upload failed"}
+        
+        print("[INFO] File ready, transcribing with pause detection...")
         model = genai.GenerativeModel("gemini-2.0-flash")
         
-        
-        prompt = """
-        Listen to this audio clip. Analyze the speaker's vocal tone and emotion.
-        Return ONLY a JSON object with these keys:
-        - emotion: (e.g., confident, nervous, excited, neutral)
-        - tone: (e.g., professional, casual, hesitancy, formal)
-        - intensity: (low, medium, high)
-        - reasoning: brief explanation
-        """
-        
-        result = model.generate_content([prompt, audio_file])
+        response = model.generate_content([
+            """Listen to this recording carefully and provide:
+            
+1. TRANSCRIPT: Transcribe EXACTLY what the person says, word for word. Include all filler words like "um", "uh", "like", etc.
+
+2. PAUSE_COUNT: Count the number of significant pauses (silence or hesitation of 2+ seconds) during the response. This includes:
+   - Long gaps before starting to speak
+   - Pauses mid-sentence where the speaker hesitates
+   - Moments of silence between thoughts
+
+Return your response in this exact format:
+TRANSCRIPT: [the transcript here]
+PAUSE_COUNT: [number]""",
+            uploaded_file
+        ])
         
         # Cleanup
         try:
-            audio_file.delete()
+            uploaded_file.delete()
         except:
             pass
-            
-        # Parse JSON from response
-        text = result.text.strip()
-        # Remove markdown code blocks if present
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1]
-            if text.endswith("```"):
-                text = text.rsplit("\n", 1)[0]
         
-        import json
+        # Parse response
+        text = response.text.strip()
+        transcript = ""
+        pause_count = 0
+        
+        if "TRANSCRIPT:" in text:
+            parts = text.split("PAUSE_COUNT:")
+            transcript = parts[0].replace("TRANSCRIPT:", "").strip()
+            if len(parts) > 1:
+                try:
+                    pause_count = int(parts[1].strip().split()[0])
+                except:
+                    pause_count = 0
+        else:
+            transcript = text
+        
+        print(f"[INFO] Transcript: {transcript[:100]}...")
+        print(f"[INFO] Detected pauses: {pause_count}")
+        return {"text": transcript, "segments": [], "pause_count": pause_count}
+        
+    except Exception as e:
+        print(f"[ERROR] Transcription failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"text": "", "segments": [], "pause_count": 0, "error": str(e)}
+
+
+def analyze_audio_with_gemini(file_path: str) -> dict:
+    """Analyze vocal tone, confidence, etc."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return {}
+    
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        
+        print(f"[INFO] Analyzing audio tone...")
+        uploaded_file = genai.upload_file(file_path)
+        
+        if not wait_for_file_active(uploaded_file):
+            return {"error": "File upload failed"}
+        
+        model = genai.GenerativeModel("gemini-2.0-flash")
+        
+        response = model.generate_content([
+            """Analyze the speaker's voice in this recording. Return a JSON object with:
+            - confidence_level: "high", "medium", or "low"
+            - tone: one of "professional", "casual", "nervous", "enthusiastic", "hesitant"
+            - energy: "high", "moderate", or "low"  
+            - clarity: "clear", "somewhat clear", or "unclear"
+            - emotion: main detected emotion
+            Return ONLY valid JSON.""",
+            uploaded_file
+        ])
+        
+        try:
+            uploaded_file.delete()
+        except:
+            pass
+        
+        text = response.text.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1].rsplit("```", 1)[0]
+        
         return json.loads(text)
         
     except Exception as e:
-        print(f"[ERROR] Tone analysis failed: {e}")
-        return {"error": str(e)}
+        print(f"[ERROR] Audio analysis failed: {e}")
+        return {"confidence_level": "medium", "tone": "professional"}
+
 
 def process_file(file_path: str) -> dict:
-    """
-    Reads an audio file and processes it using the transcription engine.
-    """
+    """Process audio/video file and return full analysis."""
     if not os.path.exists(file_path):
         return {"error": f"File not found: {file_path}"}
-        
-    try:
-        with open(file_path, "rb") as f:
-            audio_bytes = f.read()
-            
-        # Determine file extension and mime type
-        _, ext = os.path.splitext(file_path)
-        mime_type = "audio/wav"
-        if ext.lower() in [".m4a", ".mp4"]:
-            mime_type = "audio/mp4"
-        elif ext.lower() == ".mp3":
-            mime_type = "audio/mp3"
-        
-        # Determine duration
-        duration = 30.0
-        if ext.lower() == ".wav":
-            import wave
-            try:
-                with wave.open(file_path, 'rb') as wf:
-                    frames = wf.getnframes()
-                    rate = wf.getframerate()
-                    duration = frames / float(rate)
-            except Exception:
-                pass 
-        
-        # 1. Transcribe
-        stt_result = transcribe_and_analyze(audio_bytes, duration_seconds=duration, file_ext=ext)
-        
-        # 2. Analyze Tone (Parallelizable in future)
-        tone_result = analyze_tone(file_path, mime_type=mime_type)
-        
-        # Merge results
-        stt_result["analysis"] = tone_result
-        
-        return stt_result
-    except Exception as e:
-        return {"error": str(e)}
+    
+    print(f"[INFO] Processing: {file_path}")
+    
+    # Get actual duration
+    duration = get_video_duration(file_path)
+    print(f"[INFO] Video duration: {duration:.1f}s")
+    
+    # 1. Transcribe
+    print("[INFO] Starting transcription...")
+    stt_result = transcribe_with_gemini(file_path)
+    transcript = stt_result.get("text", "")
+    segments = stt_result.get("segments", [])
+    
+    if not transcript:
+        print("[WARN] No transcript generated")
+    
+    # Get pause count from transcription
+    pause_count = stt_result.get("pause_count", 0)
+    
+    # 2. Extract metrics
+    print("[INFO] Extracting metrics...")
+    metrics = extract_metrics(transcript, segments, duration_seconds=duration)
+    # Override pause_count with Gemini's detection
+    metrics["pause_count"] = pause_count
+    
+    # 3. Analyze audio tone
+    print("[INFO] Analyzing tone...")
+    analysis = analyze_audio_with_gemini(file_path)
+    
+    return {
+        "transcript": transcript,
+        "segments": segments,
+        "metrics": metrics,
+        "analysis": analysis
+    }
+
 
 if __name__ == "__main__":
     import sys
-    # Add parent directory to path to find config
-    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-    from config import Config
-    
-    # Check for command line argument, otherwise use default from get_recording.py
     if len(sys.argv) > 1:
-        audio_file = sys.argv[1]
+        result = process_file(sys.argv[1])
+        print(json.dumps(result, indent=2))
     else:
-        # Default path where get_recording.py saves it
-        if "data" not in os.listdir("."):
-             # Try to find data dir relative to script if run from root
-             audio_file = os.path.join("data", "test_audio.wav")
-        else:
-             audio_file = "data/test_audio.wav"
-             
-        # Check absolute path fallback from config if imported
-        if not os.path.exists(audio_file):
-             # Try Config.DATA_DIR
-             audio_file = os.path.join(Config.DATA_DIR, "test_audio.wav")
-    
-    print(f"Processing audio file: {audio_file}")
-    result = process_file(audio_file)
-    print("Result:")
-    print(result)
+        print("Usage: python voice_engine.py <audio_file>")
