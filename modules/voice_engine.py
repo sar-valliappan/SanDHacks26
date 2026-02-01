@@ -39,10 +39,11 @@ def extract_metrics(transcript: str, duration_seconds: float = 30.0) -> dict:
         "pause_count": pause_count,
     }
 
-def groq_transcribe(audio_bytes: bytes, file_ext: str = ".wav") -> str:
+def groq_transcribe(audio_bytes: bytes, file_ext: str = ".wav") -> dict:
     """
     Groq Whisper STT.
     Pass audio as (filename, bytes) so the SDK knows the format.
+    Returns: {"text": str, "segments": list}
     """
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
@@ -52,12 +53,20 @@ def groq_transcribe(audio_bytes: bytes, file_ext: str = ".wav") -> str:
     client = Groq(api_key=api_key)
 
     filename = f"audio{file_ext}"  # e.g. audio.m4a, audio.wav
+    
+    # Use verbose_json to get segments/timestamps
     result = client.audio.transcriptions.create(
-        file=(filename, audio_bytes),   # ✅ key fix
-        model="whisper-large-v3"
+        file=(filename, audio_bytes),
+        model="whisper-large-v3",
+        response_format="verbose_json"
     )
 
-    return result.text
+    # result is a dictionary-like object when using verbose_json in Groq/OpenAI client
+    # It has 'text' and 'segments'
+    return {
+        "text": result.text,
+        "segments": result.segments
+    }
 
 
 def transcribe_and_analyze(audio_bytes: bytes, duration_seconds: float = 30.0, file_ext: str = ".wav") -> dict:
@@ -65,12 +74,17 @@ def transcribe_and_analyze(audio_bytes: bytes, duration_seconds: float = 30.0, f
     Returns:
       {
         "transcript": str,
+        "segments": list, # New field with timestamps
         "metrics": { pace_wpm, filler_words, pause_count, ... }
       }
     """
 
+    segments = []
+    
     if STT_PROVIDER == "groq":
-        transcript = groq_transcribe(audio_bytes, file_ext=file_ext)
+        result = groq_transcribe(audio_bytes, file_ext=file_ext)
+        transcript = result.get("text", "")
+        segments = result.get("segments", [])
     else:
         print("[INFO] Using MOCK STT provider (set STT_PROVIDER='groq' to use real API)")
         # Mock transcript fallback (demo-safe)
@@ -78,9 +92,70 @@ def transcribe_and_analyze(audio_bytes: bytes, duration_seconds: float = 30.0, f
             "I led a project under pressure when our deadline changed. "
             "Um, like, we had to reorganize fast."
         )
+        # Mock segments
+        segments = [
+            {"start": 0.0, "end": 2.5, "text": "I led a project under pressure when our deadline changed."},
+            {"start": 3.0, "end": 6.0, "text": "Um, like, we had to reorganize fast."}
+        ]
 
     metrics = extract_metrics(transcript, duration_seconds=duration_seconds)
-    return {"transcript": transcript, "metrics": metrics}
+    return {"transcript": transcript, "segments": segments, "metrics": metrics}
+
+    metrics = extract_metrics(transcript, duration_seconds=duration_seconds)
+    return {"transcript": transcript, "segments": segments, "metrics": metrics}
+
+def analyze_tone(file_path: str, mime_type: str = "audio/wav") -> dict:
+    """
+    Uses Gemini to analyze the vocal tone and emotion of the audio.
+    """
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+         print("[INFO] Skipping tone analysis: GEMINI_API_KEY not found.")
+         return {"tone": "unknown", "emotion": "unknown", "intensity": "unknown"}
+
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        
+        # Upload the file to Gemini
+        # Note: For efficiency in production, consider inline data if file is small, 
+        # or File API if large. Here we use File API for simplicity.
+        audio_file = genai.upload_file(file_path, mime_type=mime_type)
+        
+        model = genai.GenerativeModel("gemini-2.0-flash")
+        
+        
+        prompt = """
+        Listen to this audio clip. Analyze the speaker's vocal tone and emotion.
+        Return ONLY a JSON object with these keys:
+        - emotion: (e.g., confident, nervous, excited, neutral)
+        - tone: (e.g., professional, casual, hesitancy, formal)
+        - intensity: (low, medium, high)
+        - reasoning: brief explanation
+        """
+        
+        result = model.generate_content([prompt, audio_file])
+        
+        # Cleanup
+        try:
+            audio_file.delete()
+        except:
+            pass
+            
+        # Parse JSON from response
+        text = result.text.strip()
+        # Remove markdown code blocks if present
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1]
+            if text.endswith("```"):
+                text = text.rsplit("\n", 1)[0]
+        
+        import json
+        return json.loads(text)
+        
+    except Exception as e:
+        print(f"[ERROR] Tone analysis failed: {e}")
+        return {"error": str(e)}
 
 def process_file(file_path: str) -> dict:
     """
@@ -93,12 +168,15 @@ def process_file(file_path: str) -> dict:
         with open(file_path, "rb") as f:
             audio_bytes = f.read()
             
-        # Determine file extension
+        # Determine file extension and mime type
         _, ext = os.path.splitext(file_path)
+        mime_type = "audio/wav"
+        if ext.lower() in [".m4a", ".mp4"]:
+            mime_type = "audio/mp4"
+        elif ext.lower() == ".mp3":
+            mime_type = "audio/mp3"
         
-        # Determine duration - for now, we'll estimate or use default since reading duration from bytes is complex without extra libs
-        # Ideally, we should use wave module or similar if we want exact duration, but for now 30.0 default is fine for metrics
-        # If the file is a wav file, we can try to get duration
+        # Determine duration
         duration = 30.0
         if ext.lower() == ".wav":
             import wave
@@ -108,9 +186,18 @@ def process_file(file_path: str) -> dict:
                     rate = wf.getframerate()
                     duration = frames / float(rate)
             except Exception:
-                pass # Fallback to default
+                pass 
         
-        return transcribe_and_analyze(audio_bytes, duration_seconds=duration, file_ext=ext)
+        # 1. Transcribe
+        stt_result = transcribe_and_analyze(audio_bytes, duration_seconds=duration, file_ext=ext)
+        
+        # 2. Analyze Tone (Parallelizable in future)
+        tone_result = analyze_tone(file_path, mime_type=mime_type)
+        
+        # Merge results
+        stt_result["analysis"] = tone_result
+        
+        return stt_result
     except Exception as e:
         return {"error": str(e)}
 
