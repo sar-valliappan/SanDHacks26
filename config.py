@@ -16,6 +16,7 @@ class Config:
     GEMINI_MODEL_NAME = "gemini-1.5-pro"
     TEMPERATURE = 0.7
     MAX_OUTPUT_TOKENS = 2048
+    MAX_QUESTIONS = 5
     
     # --- FILE SYSTEM PATHS ---
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
