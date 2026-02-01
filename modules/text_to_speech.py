@@ -20,7 +20,7 @@ class TextToSpeech:
         Converts text to speech using Gemini 2.5 and saves it as a .wav file.
         """
         output_filename = f"question_{question_number}.wav"
-        output_path = os.path.join(Config.DATA_DIR, output_filename)
+        output_path = os.path.join(Config.QUESTION_AUDIOS_DIR, output_filename)
 
         # 2026 Gemini 2.5 TTS allows style prompting
         # Options: 'Charon' (Informative), 'Puck' (Upbeat), 'Kore' (Firm)
@@ -64,11 +64,12 @@ class TextToSpeech:
         if os.name == 'nt': # Windows
             os.system(f"start {file_path}")
         else: # Mac/Linux
-            os.system(f"afplay {file_path} &")
+            os.system(f"afplay {file_path}")
 
 if __name__ == "__main__":
     voice = TextToSpeech()
     print("Generating voice...")
     res = voice.generate_audio("What is your name?", 1)
     if res:
-        voice.play_audio(res)   
+        voice.play_audio(res)
+    print(1)   

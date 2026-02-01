@@ -17,6 +17,10 @@ dist/
 # --- Local Data & Recordings ---
 # We ignore the contents of data/ but keep the directory structure
 data/questions.json
+data/resumes/
+data/answer_videos/
+data/answer_audios/
+data/question_audios/
 
 # If you want to keep the folders but ignore files:
 !data/.gitkeep
